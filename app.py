@@ -2,7 +2,7 @@ import chainlit as cl
 from src.ibusiness_agentRAG import app
 
 
-welcome_message = "¡Welcome! ¿How can I help you?"
+welcome_message = "¡Welcome! I am an agent that answer questions about AI and albums. ¿How can I help you?"
 @cl.on_chat_start
 async def start_chat():
 
@@ -22,7 +22,7 @@ async def main(message: cl.Message):
     for output in runnable.stream(input):
         for key, value in output.items():
             print(f"Finished running: {key}:")
-            if key == "generate":
+            if key == "generate" or key == "start":
                 answer = value["answer"]
                 await msg.stream_token(answer)
 
