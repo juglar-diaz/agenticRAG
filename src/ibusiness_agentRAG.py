@@ -18,11 +18,11 @@ from langchain_chroma import Chroma
 
 from langchain_google_vertexai import VertexAI, VertexAIEmbeddings
 
+from src.prompts import RAG_PROMPT_TEMPLATE, ROUTER_AGENT_PROMPT_TEMPLATE
 
 load_dotenv()
 PROJECT_ID = os.getenv("GCP_PROJECT", "")  # @param {type:"string"}
 LOCATION = os.getenv("GCP_LOCATION", "")  # @param {type:"string"}
-STAGING_BUCKET = os.getenv("GCP_LOCATION", "")  # @param {type:"string"}
 
 if PROJECT_ID == "":
     print("Warning: GCP_PROJECT is not set")
@@ -30,14 +30,14 @@ if PROJECT_ID == "":
 if LOCATION == "":
     print("Warning: GCP_LOCATION is not set")
 
-if STAGING_BUCKET == "":
-    print("Warning: STAGING_BUCKET is not set")
 
 import vertexai
-vertexai.init(project=PROJECT_ID, location=LOCATION, staging_bucket=STAGING_BUCKET)
+#vertexai.init(project=PROJECT_ID, location=LOCATION)
+vertexai.init()
 
 # Setup the models
-embed_model = VertexAIEmbeddings(model_name="text-embedding-preview-0815")
+# Configure embedding model, for example "text-embedding-004".
+embed_model = VertexAIEmbeddings(model_name="text-multilingual-embedding-002")
 
 model = "gemini-1.5-pro-001"
 llm = VertexAI(model_name=model)
@@ -56,20 +56,6 @@ vectorstore_ai_history = Chroma.from_documents(documents=doc_splits_ai_history, 
 # Setup the retriever
 retriever_ai_history = vectorstore_ai_history.as_retriever(search_type="similarity", search_kwargs={"k": 1})
 
-
-
-# Define RAG Chain
-RAG_PROMPT_TEMPLATE = """
-- You are an agent that answer questions about Musics Albums and Artificial Intelligence (AI).
-Always answer the question using the given context.
-If the context is about several topics simultaneously, combine them coherently in your answer.
-Use the following context to answer the question.
-{context}
-
-Question: {question}
-Answer:
-"""
-
 def format_docs(docs):
     return "\n\n".join(doc.page_content for doc in docs)
 
@@ -84,22 +70,6 @@ response_chain = (rag_prompt
 
 )
 
-# Setup Router Chain
-ROUTER_AGENT_PROMPT_TEMPLATE = """
-You are an expert delegating questions from users to the correct agent:
- 'retrieve_albums', 'retrieve_ai_history', or 'retrieve_albums_ai' using the following criteria:
-
-- If the question is only about Musics Albums, use 'retrieve_albums'.
-- If the question is only about Artificial Intelligence (AI) history, use 'retrieve_ai_history'.
-- If the question is about Artificial Intelligence (AI) history and Musics Albums, use 'retrieve_albums_ai'.
-
-The output must be a well formed JSON object with a single key: 'agent' and one of the values:
-'retrieve_albums', 'retrieve_ai_history', or 'retrieve_albums_ai'.
-
-Do not include any preamble, explanation or additional text.
-
-User question: {question}
-"""
 
 router_prompt = PromptTemplate(
     template=ROUTER_AGENT_PROMPT_TEMPLATE, input_variables=["question"]
@@ -141,7 +111,7 @@ def retrieve_ai_history(state):
     """
     print("---RETRIEVE DOCUMENTS---")
     question = state["question"]
-    documents = compression_retriever_ai_history.invoke(question)
+    documents = retriever_ai_history.invoke(question)
     return {"documents": documents, "question": question}
 
 def retrieve_albums(state):
@@ -176,7 +146,7 @@ def retrieve_albums_ai(state):
     """
     print("---RETRIEVE DOCUMENTS---")
     question = state["question"]
-    documents = compression_retriever_ai_history.invoke(question)
+    documents = retriever_ai_history.invoke(question)
 
     print("---USE API---")
 
@@ -212,6 +182,21 @@ def generate(state):
 
     return {"documents": documents, "question": question, "answer": answer}
 
+def start(state):
+    """
+     Answer when to msg is unrelated to the data
+
+    Args:
+        state (dict): The current graph state
+
+    Returns:
+        state (dict): New key added to state, generation, that contains LLM generation
+    """
+    print("---GENERATE ANSWER---")
+    question = state["question"]
+    answer = "Sorry, I only can help you by answering questions about AI and albums."
+    return {"question": question, "answer": answer}
+
 
 ########### Build Execution Graph ###########
 workflow = StateGraph(AgentState)
@@ -221,6 +206,7 @@ workflow.add_node("retrieve_albums", retrieve_albums)
 workflow.add_node("retrieve_ai_history", retrieve_ai_history)
 workflow.add_node("retrieve_albums_ai", retrieve_albums_ai)
 workflow.add_node("generate", generate)
+workflow.add_node("start", start)
 
 workflow.set_conditional_entry_point(
     route_question,
@@ -228,14 +214,15 @@ workflow.set_conditional_entry_point(
         "retrieve_albums": "retrieve_albums",
         "retrieve_ai_history": "retrieve_ai_history",
         "retrieve_albums_ai": "retrieve_albums_ai",
-
+        "start": "start",
     },
 )
 
 workflow.add_edge("retrieve_ai_history", "generate")
 workflow.add_edge("retrieve_albums", "generate")
 workflow.add_edge("retrieve_albums_ai", "generate")
-
 workflow.add_edge("generate", END)
+workflow.add_edge("start", END)
+
 
 app = workflow.compile()
